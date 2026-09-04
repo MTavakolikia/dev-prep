@@ -6,7 +6,7 @@
 // All actions re-check permissions server-side (RBAC).
 // ============================================================
 import { db } from '@/lib/db';
-import { getCurrentUser } from '@/lib/auth';
+import { getCurrentUser, hashPassword } from '@/lib/auth';
 import { mapArticle, articleInclude } from '@/server/mappers';
 import { excerptFrom } from '@/lib/slug';
 import type { AdminOverviewDTO, ArticleDTO, Role, UserDTO } from '@/types';
@@ -299,11 +299,13 @@ export async function adminRestoreRevisionAction(articleId: string, revisionId: 
 }
 
 // ---------------- users ----------------
-export async function adminListUsersAction(opts: { search?: string; role?: string; page?: number }): Promise<{ users: UserDTO[]; total: number }> {
+export async function adminListUsersAction(opts: { search?: string; role?: string; page?: number; showRemoved?: boolean }): Promise<{ users: (UserDTO & { deletedAt: string | null })[]; total: number }> {
   await requireStaff();
   const page = Math.max(1, opts.page ?? 1);
   const pageSize = 12;
-  const where: Record<string, unknown> = { deletedAt: null };
+  const where: Record<string, unknown> = {};
+  // when showRemoved is false (default) hide soft-deleted users; when true include them
+  if (!opts.showRemoved) where.deletedAt = null;
   if (opts.role) where.role = opts.role;
   if (opts.search) where.OR = [{ name: { contains: opts.search } }, { email: { contains: opts.search } }];
   const [rows, total] = await Promise.all([
@@ -318,7 +320,7 @@ export async function adminListUsersAction(opts: { search?: string; role?: strin
     users: rows.map((u) => ({
       id: u.id, name: u.name, email: u.email, role: u.role as Role, avatarColor: u.avatarColor,
       headline: u.headline, bio: u.bio, xp: u.xp, level: u.level, streakCount: u.streakCount,
-      longestStreak: u.longestStreak, createdAt: u.createdAt.toISOString(), articleCount: u._count.articles,
+      longestStreak: u.longestStreak, createdAt: u.createdAt.toISOString(), deletedAt: u.deletedAt ? u.deletedAt.toISOString() : null, articleCount: u._count.articles,
     })),
     total,
   };
@@ -332,6 +334,90 @@ export async function adminSetUserRoleAction(userId: string, role: string): Prom
   const target = await db.user.findUnique({ where: { id: userId } });
   if (target?.role === 'SUPER_ADMIN' && me.role !== 'SUPER_ADMIN') return { ok: false, error: 'Only a super admin can modify a super admin' };
   await db.user.update({ where: { id: userId }, data: { role } });
+  return { ok: true };
+}
+
+export async function adminCreateUserAction(input: { name: string; email: string; password: string; role: string; headline: string }): Promise<{ ok: boolean; error?: string; id?: string }> {
+  const me = await requireStaff('ADMIN');
+  const email = input.email.trim().toLowerCase();
+  const name = input.name.trim();
+  if (!name || !email) return { ok: false, error: 'Name and email are required' };
+  if (!email.includes('@')) return { ok: false, error: 'Invalid email' };
+  if (!input.password || input.password.length < 8) return { ok: false, error: 'Password must be at least 8 characters' };
+  if (!['USER', 'AUTHOR', 'EDITOR', 'ADMIN', 'SUPER_ADMIN'].includes(input.role)) return { ok: false, error: 'Invalid role' };
+  if (input.role === 'SUPER_ADMIN' && me.role !== 'SUPER_ADMIN') return { ok: false, error: 'Only a super admin can create a super admin' };
+  const existing = await db.user.findUnique({ where: { email } });
+  if (existing) return { ok: false, error: 'An account with this email already exists' };
+  const user = await db.user.create({
+    data: {
+      name, email,
+      passwordHash: hashPassword(input.password),
+      role: input.role,
+      headline: input.headline?.trim() || null,
+      avatarColor: ['violet', 'cyan', 'emerald', 'amber', 'rose'][Math.floor(Math.random() * 5)],
+    },
+  });
+  return { ok: true, id: user.id };
+}
+
+export async function adminUpdateUserAction(id: string, input: { name: string; email: string; role: string; headline: string; bio: string }): Promise<{ ok: boolean; error?: string }> {
+  const me = await requireStaff('ADMIN');
+  const target = await db.user.findUnique({ where: { id } });
+  if (!target) return { ok: false, error: 'User not found' };
+  if (target.role === 'SUPER_ADMIN' && me.role !== 'SUPER_ADMIN') return { ok: false, error: 'Only a super admin can modify a super admin' };
+  if (input.role === 'SUPER_ADMIN' && me.role !== 'SUPER_ADMIN') return { ok: false, error: 'Only a super admin can grant super admin' };
+  if (me.id === id && input.role !== target.role) return { ok: false, error: 'You cannot change your own role' };
+  if (!['USER', 'AUTHOR', 'EDITOR', 'ADMIN', 'SUPER_ADMIN'].includes(input.role)) return { ok: false, error: 'Invalid role' };
+  const email = input.email.trim().toLowerCase();
+  if (!email.includes('@')) return { ok: false, error: 'Invalid email' };
+  if (email !== target.email) {
+    const dup = await db.user.findUnique({ where: { email } });
+    if (dup) return { ok: false, error: 'An account with this email already exists' };
+  }
+  await db.user.update({
+    where: { id },
+    data: {
+      name: input.name.trim() || target.name,
+      email,
+      role: input.role,
+      headline: input.headline?.trim() || null,
+      bio: input.bio?.trim() || null,
+    },
+  });
+  return { ok: true };
+}
+
+export async function adminDeleteUserAction(id: string): Promise<{ ok: boolean; error?: string }> {
+  const me = await requireStaff('ADMIN');
+  if (me.id === id) return { ok: false, error: 'You cannot remove yourself' };
+  const target = await db.user.findUnique({ where: { id } });
+  if (!target) return { ok: false, error: 'User not found' };
+  if (target.deletedAt) return { ok: false, error: 'User already removed' };
+  if (target.role === 'SUPER_ADMIN' && me.role !== 'SUPER_ADMIN') return { ok: false, error: 'Only a super admin can remove a super admin' };
+  await db.user.update({ where: { id }, data: { deletedAt: new Date() } });
+  await db.session.deleteMany({ where: { userId: id } }).catch(() => {});
+  return { ok: true };
+}
+
+export async function adminRestoreUserAction(id: string): Promise<{ ok: boolean; error?: string }> {
+  await requireStaff('ADMIN');
+  const target = await db.user.findUnique({ where: { id } });
+  if (!target) return { ok: false, error: 'User not found' };
+  if (!target.deletedAt) return { ok: false, error: 'User is not removed' };
+  await db.user.update({ where: { id }, data: { deletedAt: null } });
+  return { ok: true };
+}
+
+export async function adminResetUserPasswordAction(id: string, password: string): Promise<{ ok: boolean; error?: string }> {
+  const me = await requireStaff('ADMIN');
+  if (!password || password.length < 8) return { ok: false, error: 'Password must be at least 8 characters' };
+  const target = await db.user.findUnique({ where: { id } });
+  if (!target) return { ok: false, error: 'User not found' };
+  if (target.role === 'SUPER_ADMIN' && me.role !== 'SUPER_ADMIN') return { ok: false, error: 'Only a super admin can reset a super admin password' };
+  if (target.deletedAt) return { ok: false, error: 'Cannot reset password for a removed user' };
+  await db.user.update({ where: { id }, data: { passwordHash: hashPassword(password) } });
+  // invalidate sessions for security
+  if (me.id !== id) await db.session.deleteMany({ where: { userId: id } }).catch(() => {});
   return { ok: true };
 }
 

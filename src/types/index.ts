@@ -3,6 +3,7 @@
 // ============================================================
 
 export type Role = 'USER' | 'AUTHOR' | 'EDITOR' | 'ADMIN' | 'SUPER_ADMIN';
+export const ALL_ROLES: Role[] = ['USER', 'AUTHOR', 'EDITOR', 'ADMIN', 'SUPER_ADMIN'];
 export const ROLE_ORDER: Record<Role, number> = { USER: 0, AUTHOR: 1, EDITOR: 2, ADMIN: 3, SUPER_ADMIN: 4 };
 export const ROLE_LABELS: Record<Role, string> = {
   USER: 'Member', AUTHOR: 'Author', EDITOR: 'Editor', ADMIN: 'Admin', SUPER_ADMIN: 'Super Admin',
@@ -33,6 +34,7 @@ export interface UserDTO {
   id: string; name: string; email: string; role: Role; avatarColor: string;
   headline: string | null; bio: string | null; xp: number; level: number;
   streakCount: number; longestStreak: number; createdAt: string;
+  deletedAt?: string | null;
   articleCount?: number;
 }
 
