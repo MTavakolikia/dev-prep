@@ -1,0 +1,11 @@
+import { PrismaClient } from '@prisma/client';
+const db = new PrismaClient();
+const c = async (n: string, f: () => Promise<number>) => console.log(`${n}: ${await f()}`);
+await c('technologies', () => db.technology.count());
+await c('articles', () => db.article.count());
+await c('interviewQuestions', () => db.interviewQuestion.count());
+await c('learningPaths', () => db.learningPath.count());
+await c('achievements', () => db.achievement.count());
+await c('categories', () => db.category.count());
+await c('users', () => db.user.count());
+await db.$disconnect();
